@@ -22,12 +22,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Download Real Sing-box Core (libbox)
-        run: |
-          mkdir -p app/libs
-          curl -L -f -o app/libs/libbox.aar https://github.com/SagerNet/sing-box/releases/download/v1.10.1/libbox-1.10.1.aar
-
-      - name: Generate Complete Project with Real Sing-box & RX UI
+      - name: Generate Complete Project with Real Xray/Sing-box Core & RX UI
         run: |
           mkdir -p app/src/main/java/com/em/client
           mkdir -p app/src/main/res/drawable
@@ -46,7 +41,7 @@ jobs:
               repositories {
                   google()
                   mavenCentral()
-                  flatDir { dirs 'app/libs' }
+                  maven { url 'https://jitpack.io' }
               }
           }
           rootProject.name = "EM-Client"
@@ -115,7 +110,7 @@ jobs:
               }
           }
           dependencies {
-              implementation fileTree(dir: 'libs', include: ['*.aar', '*.jar'])
+              implementation 'com.github.2dust:AndroidLibXrayLite:v1.8.24'
               implementation 'androidx.core:core-ktx:1.12.0'
               implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
               implementation 'androidx.activity:activity-compose:1.8.2'
@@ -134,7 +129,6 @@ jobs:
           android.nonTransitiveRClass=true
           EOF
 
-          # Custom Monochrome Liquid Glass Launcher Icon (EM CLIENT)
           cat << 'EOF' > app/src/main/res/drawable/ic_launcher_bg.xml
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp"
@@ -215,8 +209,7 @@ jobs:
           </manifest>
           EOF
 
-          # Config Parser (Converts VLESS / VMess / WireGuard URIs into Sing-box JSON)
-          cat << 'EOF' > app/src/main/java/com/em/client/SingBoxConfigBuilder.kt
+          cat << 'EOF' > app/src/main/java/com/em/client/XrayConfigBuilder.kt
           package com.em.client
 
           import android.net.Uri
@@ -224,9 +217,9 @@ jobs:
           import org.json.JSONArray
           import org.json.JSONObject
 
-          object SingBoxConfigBuilder {
+          object XrayConfigBuilder {
 
-              fun buildSingBoxJson(rawInput: String): String {
+              fun buildConfig(rawInput: String): String {
                   val trimmed = rawInput.trim()
                   if (trimmed.startsWith("{")) return trimmed
 
@@ -238,38 +231,21 @@ jobs:
                   }
 
                   val root = JSONObject()
-                  root.put("log", JSONObject().put("level", "error"))
+                  root.put("log", JSONObject().put("loglevel", "warning"))
 
-                  val dns = JSONObject()
-                      .put("servers", JSONArray()
-                          .put(JSONObject().put("tag", "google").put("address", "https://8.8.8.8/dns-query").put("detour", "proxy"))
-                          .put(JSONObject().put("tag", "local").put("address", "223.5.5.5").put("detour", "direct"))
-                      )
-                  root.put("dns", dns)
+                  val socksInbound = JSONObject()
+                      .put("tag", "socks")
+                      .put("port", 10808)
+                      .put("listen", "127.0.0.1")
+                      .put("protocol", "socks")
+                      .put("settings", JSONObject().put("auth", "noauth").put("udp", true))
 
-                  val tunInbound = JSONObject()
-                      .put("type", "tun")
-                      .put("tag", "tun-in")
-                      .put("inet4_address", "172.19.0.1/30")
-                      .put("mtu", 1500)
-                      .put("auto_route", true)
-                      .put("strict_route", false)
-                      .put("sniff", true)
-
-                  root.put("inbounds", JSONArray().put(tunInbound))
+                  root.put("inbounds", JSONArray().put(socksInbound))
 
                   val outbounds = JSONArray()
                       .put(outbound)
-                      .put(JSONObject().put("type", "direct").put("tag", "direct"))
-                      .put(JSONObject().put("type", "dns").put("tag", "dns-out"))
+                      .put(JSONObject().put("protocol", "freedom").put("tag", "direct"))
                   root.put("outbounds", outbounds)
-
-                  val route = JSONObject()
-                      .put("auto_detect_interface", true)
-                      .put("rules", JSONArray()
-                          .put(JSONObject().put("protocol", "dns").put("outbound", "dns-out"))
-                      )
-                  root.put("route", route)
 
                   return root.toString(2)
               }
@@ -287,39 +263,45 @@ jobs:
                   val hostHeader = uri.getQueryParameter("host") ?: sni
                   val pbk = uri.getQueryParameter("pbk") ?: ""
                   val sid = uri.getQueryParameter("sid") ?: ""
+                  val flow = uri.getQueryParameter("flow") ?: ""
 
-                  val out = JSONObject()
-                      .put("type", "vless")
+                  val userObj = JSONObject()
+                      .put("id", uuid)
+                      .put("encryption", "none")
+                  if (flow.isNotEmpty()) userObj.put("flow", flow)
+
+                  val vnextObj = JSONObject()
+                      .put("address", host)
+                      .put("port", port)
+                      .put("users", JSONArray().put(userObj))
+
+                  val stream = JSONObject().put("network", type).put("security", security)
+                  if (security == "tls") {
+                      stream.put("tlsSettings", JSONObject()
+                          .put("serverName", sni)
+                          .put("fingerprint", fp)
+                          .put("allowInsecure", true))
+                  } else if (security == "reality") {
+                      stream.put("realitySettings", JSONObject()
+                          .put("serverName", sni)
+                          .put("fingerprint", fp)
+                          .put("publicKey", pbk)
+                          .put("shortId", sid))
+                  }
+
+                  if (type == "ws") {
+                      val ws = JSONObject().put("path", path)
+                      if (hostHeader.isNotEmpty()) ws.put("headers", JSONObject().put("Host", hostHeader))
+                      stream.put("wsSettings", ws)
+                  } else if (type == "grpc") {
+                      stream.put("grpcSettings", JSONObject().put("serviceName", uri.getQueryParameter("serviceName") ?: ""))
+                  }
+
+                  return JSONObject()
+                      .put("protocol", "vless")
                       .put("tag", "proxy")
-                      .put("server", host)
-                      .put("server_port", port)
-                      .put("uuid", uuid)
-
-                  if (security == "tls" || security == "reality") {
-                      val tls = JSONObject()
-                          .put("enabled", true)
-                          .put("server_name", sni)
-                          .put("utls", JSONObject().put("enabled", true).put("fingerprint", fp))
-                      if (security == "reality") {
-                          tls.put("reality", JSONObject().put("enabled", true).put("public_key", pbk).put("short_id", sid))
-                      }
-                      out.put("tls", tls)
-                  }
-
-                  when (type) {
-                      "ws" -> {
-                          val transport = JSONObject().put("type", "ws").put("path", path)
-                          if (hostHeader.isNotEmpty()) {
-                              transport.put("headers", JSONObject().put("Host", hostHeader))
-                          }
-                          out.put("transport", transport)
-                      }
-                      "grpc" -> {
-                          val serviceName = uri.getQueryParameter("serviceName") ?: ""
-                          out.put("transport", JSONObject().put("type", "grpc").put("service_name", serviceName))
-                      }
-                  }
-                  return out
+                      .put("settings", JSONObject().put("vnext", JSONArray().put(vnextObj)))
+                      .put("streamSettings", stream)
               }
 
               private fun parseVmess(uriStr: String): JSONObject {
@@ -336,34 +318,32 @@ jobs:
                   val path = j.optString("path", "/")
                   val hostHeader = j.optString("host", sni)
 
-                  val out = JSONObject()
-                      .put("type", "vmess")
-                      .put("tag", "proxy")
-                      .put("server", host)
-                      .put("server_port", port)
-                      .put("uuid", uuid)
-                      .put("alter_id", aid)
-                      .put("security", "auto")
+                  val userObj = JSONObject().put("id", uuid).put("alterId", aid).put("security", "auto")
+                  val vnextObj = JSONObject().put("address", host).put("port", port).put("users", JSONArray().put(userObj))
 
+                  val stream = JSONObject().put("network", net)
                   if (tlsMode == "tls") {
-                      out.put("tls", JSONObject().put("enabled", true).put("server_name", sni))
+                      stream.put("security", "tls")
+                      stream.put("tlsSettings", JSONObject().put("serverName", sni).put("allowInsecure", true))
                   }
                   if (net == "ws") {
-                      val transport = JSONObject().put("type", "ws").put("path", path)
-                      if (hostHeader.isNotEmpty()) {
-                          transport.put("headers", JSONObject().put("Host", hostHeader))
-                      }
-                      out.put("transport", transport)
+                      val ws = JSONObject().put("path", path)
+                      if (hostHeader.isNotEmpty()) ws.put("headers", JSONObject().put("Host", hostHeader))
+                      stream.put("wsSettings", ws)
                   }
-                  return out
+
+                  return JSONObject()
+                      .put("protocol", "vmess")
+                      .put("tag", "proxy")
+                      .put("settings", JSONObject().put("vnext", JSONArray().put(vnextObj)))
+                      .put("streamSettings", stream)
               }
 
               private fun parseWireGuard(conf: String): JSONObject {
                   var privateKey = ""
                   var address = "10.0.0.2/32"
                   var peerPublicKey = ""
-                  var endpointHost = ""
-                  var endpointPort = 51820
+                  var endpoint = ""
 
                   conf.lines().forEach { rawLine ->
                       val line = rawLine.trim()
@@ -371,28 +351,25 @@ jobs:
                           line.startsWith("PrivateKey", true) -> privateKey = line.substringAfter("=").trim()
                           line.startsWith("Address", true) -> address = line.substringAfter("=").substringBefore(",").trim()
                           line.startsWith("PublicKey", true) -> peerPublicKey = line.substringAfter("=").trim()
-                          line.startsWith("Endpoint", true) -> {
-                              val ep = line.substringAfter("=").trim()
-                              endpointHost = ep.substringBeforeLast(":")
-                              endpointPort = ep.substringAfterLast(":").toIntOrNull() ?: 51820
-                          }
+                          line.startsWith("Endpoint", true) -> endpoint = line.substringAfter("=").trim()
                       }
                   }
 
-                  return JSONObject()
-                      .put("type", "wireguard")
-                      .put("tag", "proxy")
-                      .put("server", endpointHost)
-                      .put("server_port", endpointPort)
-                      .put("local_address", JSONArray().put(address))
-                      .put("private_key", privateKey)
-                      .put("peer_public_key", peerPublicKey)
+                  val peer = JSONObject().put("publicKey", peerPublicKey).put("endpoint", endpoint)
+                  val settings = JSONObject()
+                      .put("secretKey", privateKey)
+                      .put("address", JSONArray().put(address))
+                      .put("peers", JSONArray().put(peer))
                       .put("mtu", 1420)
+
+                  return JSONObject()
+                      .put("protocol", "wireguard")
+                      .put("tag", "proxy")
+                      .put("settings", settings)
               }
           }
           EOF
 
-          # Real Sing-box VPN Service Implementation
           cat << 'EOF' > app/src/main/java/com/em/client/EmVpnService.kt
           package com.em.client
 
@@ -406,21 +383,13 @@ jobs:
           import android.util.Log
           import androidx.core.app.NotificationCompat
           import androidx.core.app.ServiceCompat
-          import io.nekohasekai.libbox.BoxService
-          import io.nekohasekai.libbox.InterfaceUpdateListener
-          import io.nekohasekai.libbox.Libbox
-          import io.nekohasekai.libbox.LocalDNSTransport
-          import io.nekohasekai.libbox.NetworkInterfaceIterator
-          import io.nekohasekai.libbox.PlatformInterface
-          import io.nekohasekai.libbox.SetupOptions
-          import io.nekohasekai.libbox.StringIterator
-          import io.nekohasekai.libbox.TunOptions
-          import io.nekohasekai.libbox.WIFIState
-          import java.io.File
+          import libv2ray.Libv2ray
+          import libv2ray.V2RayPoint
+          import libv2ray.V2RayVPNServiceSupportsSet
 
-          class EmVpnService : VpnService(), PlatformInterface {
+          class EmVpnService : VpnService() {
               private var vpnInterface: ParcelFileDescriptor? = null
-              private var boxService: BoxService? = null
+              private var v2rayPoint: V2RayPoint? = null
 
               companion object {
                   const val ACTION_CONNECT = "com.em.client.CONNECT"
@@ -431,39 +400,37 @@ jobs:
 
               override fun onCreate() {
                   super.onCreate()
-                  val baseDir = File(filesDir, "sing-box").apply { mkdirs() }
-                  val workDir = File(baseDir, "work").apply { mkdirs() }
-                  val tempDir = File(cacheDir, "sing-box-tmp").apply { mkdirs() }
-                  val options = SetupOptions().apply {
-                      basePath = baseDir.absolutePath
-                      workingPath = workDir.absolutePath
-                      tempPath = tempDir.absolutePath
-                  }
-                  try {
-                      Libbox.setup(options)
-                  } catch (e: Exception) {
-                      Log.e("EM_VPN", "Libbox setup error", e)
-                  }
+                  Libv2ray.initV2Env(filesDir.absolutePath, "")
+                  v2rayPoint = Libv2ray.newV2RayPoint(object : V2RayVPNServiceSupportsSet {
+                      override fun shutdown(): Long {
+                          stopTunnel()
+                          return 0
+                      }
+                      override fun prepare(): Long = 0
+                      override fun protect(l: Long): Boolean = this@EmVpnService.protect(l.toInt())
+                      override fun onEmitStatus(l: Long, s: String?): Long = 0
+                      override fun setup(s: String?): Long = 0
+                  }, false)
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   when (intent?.action) {
                       ACTION_CONNECT -> {
                           val rawConfig = intent.getStringExtra("CONFIG") ?: ""
-                          startSingBoxTunnel(rawConfig)
+                          startTunnel(rawConfig)
                       }
-                      ACTION_DISCONNECT -> stopSingBoxTunnel()
+                      ACTION_DISCONNECT -> stopTunnel()
                   }
                   return START_STICKY
               }
 
-              private fun startSingBoxTunnel(rawConfig: String) {
-                  if (isRunning) stopSingBoxTunnel()
+              private fun startTunnel(rawConfig: String) {
+                  if (isRunning) stopTunnel()
                   lastError = null
                   createNotificationChannel()
                   val notification = NotificationCompat.Builder(this, "EM_VPN_CHANNEL")
                       .setContentTitle("EM CLIENT")
-                      .setContentText("متصل • هسته Sing-box فعال است")
+                      .setContentText("متصل • هسته پرسرعت Xray/WireGuard فعال است")
                       .setSmallIcon(android.R.drawable.ic_lock_lock)
                       .setOngoing(true)
                       .build()
@@ -478,63 +445,36 @@ jobs:
                   }
 
                   try {
-                      val jsonConfig = SingBoxConfigBuilder.buildSingBoxJson(rawConfig)
-                      val service = Libbox.newService(jsonConfig, this)
-                      service.start()
-                      boxService = service
+                      val jsonConfig = XrayConfigBuilder.buildConfig(rawConfig)
+                      val builder = Builder()
+                          .setSession("EM CLIENT")
+                          .setMtu(1500)
+                          .addAddress("10.1.0.2", 24)
+                          .addDnsServer("8.8.8.8")
+                          .addRoute("0.0.0.0", 0)
+                      try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
+
+                      vpnInterface = builder.establish() ?: throw IllegalStateException("TUN failed")
+
+                      v2rayPoint?.configureFileContent = jsonConfig
+                      v2rayPoint?.domainName = "1.1.1.1:443"
+                      v2rayPoint?.runLoop(false)
                       isRunning = true
                   } catch (e: Exception) {
-                      lastError = e.message ?: "خطا در اتصال هسته"
-                      Log.e("EM_VPN", "Start failed", e)
-                      stopSingBoxTunnel()
+                      lastError = e.message ?: "خطا در اجرای هسته"
+                      Log.e("EM_VPN", "Core start error", e)
+                      stopTunnel()
                   }
               }
 
-              private fun stopSingBoxTunnel() {
+              private fun stopTunnel() {
                   isRunning = false
-                  try { boxService?.close() } catch (_: Exception) {}
-                  boxService = null
+                  try { v2rayPoint?.stopLoop() } catch (_: Exception) {}
                   try { vpnInterface?.close() } catch (_: Exception) {}
                   vpnInterface = null
                   stopForeground(STOP_FOREGROUND_REMOVE)
                   stopSelf()
               }
-
-              override fun openTun(options: TunOptions): Int {
-                  val builder = Builder()
-                      .setSession("EM CLIENT")
-                      .setMtu(options.mtu)
-                      .addAddress("172.19.0.1", 30)
-                      .addDnsServer("8.8.8.8")
-                      .addRoute("0.0.0.0", 0)
-
-                  try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
-
-                  val pfd = builder.establish() ?: throw IllegalStateException("Cannot establish TUN")
-                  vpnInterface = pfd
-                  return pfd.fd
-              }
-
-              override fun autoDetectInterfaceControl(fd: Int) {
-                  protect(fd)
-              }
-
-              override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
-              override fun useProcFS(): Boolean = false
-              override fun findConnectionOwner(p0: Int, p1: String?, p2: Int, p3: String?, p4: Int): Int = -1
-              override fun packageNameByUid(uid: Int): String = packageManager.getNameForUid(uid) ?: ""
-              override fun uidByPackageName(pkg: String): Int = try { packageManager.getApplicationInfo(pkg, 0).uid } catch (_: Exception) { -1 }
-              override fun startDefaultInterfaceMonitor(p0: InterfaceUpdateListener?) {}
-              override fun closeDefaultInterfaceMonitor(p0: InterfaceUpdateListener?) {}
-              override fun getInterfaces(): NetworkInterfaceIterator? = null
-              override fun underNetworkExtension(): Boolean = false
-              override fun includeAllNetworks(): Boolean = false
-              override fun clearDNSCache() {}
-              override fun readWIFIState(): WIFIState? = null
-              override fun localDNSTransport(): LocalDNSTransport? = null
-              override fun systemCertificates(): StringIterator? = null
-              override fun writeLog(message: String?) { Log.d("SingBox", message ?: "") }
-              override fun sendNotification(p0: io.nekohasekai.libbox.Notification?) {}
 
               private fun createNotificationChannel() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -547,13 +487,12 @@ jobs:
               }
 
               override fun onDestroy() {
-                  stopSingBoxTunnel()
+                  stopTunnel()
                   super.onDestroy()
               }
           }
           EOF
 
-          # New RX-Inspired Liquid Glass UI (Overwrites old MainActivity completely)
           cat << 'EOF' > app/src/main/java/com/em/client/MainActivity.kt
           package com.em.client
 
@@ -788,7 +727,7 @@ jobs:
                               }
                               Spacer(modifier = Modifier.height(12.dp))
                               Text("EM CLIENT", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                              Text("هسته Sing-box • VLESS / VMess / WG", color = Color.Gray, fontSize = 11.sp)
+                              Text("هسته Xray & WireGuard • VLESS / VMess", color = Color.Gray, fontSize = 11.sp)
                           }
 
                           Divider(color = Color.White.copy(alpha = 0.08f))
@@ -806,7 +745,7 @@ jobs:
                               scope.launch { drawerState.close() }
                           }
 
-                          DrawerGlassButton("نسخه برنامه: 3.0.0 (Sing-box Core)", Icons.Rounded.Info) {
+                          DrawerGlassButton("نسخه برنامه: 3.0.0", Icons.Rounded.Info) {
                               scope.launch { drawerState.close() }
                           }
                       }
@@ -1127,7 +1066,7 @@ jobs:
                                       )
                                       Spacer(modifier = Modifier.width(8.dp))
                                       Text(
-                                          text = if (isConnected) "متصل به هسته Sing-box" else "متصل نیست",
+                                          text = if (isConnected) "متصل به تونل امن EM" else "متصل نیست",
                                           color = if (isConnected) Color.White else Color.Gray,
                                           fontSize = 12.sp
                                       )
@@ -1364,9 +1303,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v3.0.0
-          name: EM CLIENT v3.0.0 (Sing-box Core + Liquid Glass)
+          name: EM CLIENT v3.0.0 (Xray + WireGuard Core)
           body: |
-            ### نسخه‌های رسمی EM CLIENT v3.0.0 (مجهز به هسته واقعی Sing-box)
+            ### نسخه‌های رسمی EM CLIENT v3.0.0
             - **EM-Client_3.0.0_Android14Plus.apk**: مخصوص گوشی‌های اندروید ۱۴، ۱۵ و بالاتر
             - **EM-Client_3.0.0_Android14Below.apk**: مخصوص گوشی‌های اندروید ۷ تا ۱۳
             - **EM-Client_3.0.0_Universal.apk**: نسخه جامع قابل نصب روی تمام دستگاه‌های اندرویدی
