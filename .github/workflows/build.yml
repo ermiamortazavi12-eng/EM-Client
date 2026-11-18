@@ -22,16 +22,20 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Download Sing-box Core (libbox)
+      - name: Configure Gradle Properties
         run: |
-          mkdir -p app/libs
-          curl -L -o app/libs/libbox.aar https://github.com/SagerNet/sing-box/releases/download/v1.10.1/libbox-1.10.1.aar || touch app/libs/libbox.aar
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
 
       - name: Generate Gradle Wrapper & Build APK
         run: |
           gradle wrapper --gradle-version 8.7
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --stacktrace
 
       - name: Upload EM-Client.apk
         uses: actions/upload-artifact@v4
