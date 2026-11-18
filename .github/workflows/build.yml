@@ -19,23 +19,76 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Auto-Repair All File Paths
+      - name: Generate Clean Android Project
         run: |
           mkdir -p app/src/main/java/com/em/client
-          
-          # Find and place AndroidManifest.xml
-          MANIFEST=$(find . -iname "AndroidManifest.xml" | head -n 1)
-          if [ -n "$MANIFEST" ] && [ "$MANIFEST" != "./app/src/main/AndroidManifest.xml" ]; then
-            cp "$MANIFEST" app/src/main/AndroidManifest.xml
-          fi
 
-          # Find and place Kotlin source files
-          for KT in MainActivity.kt EmVpnService.kt; do
-            FOUND_KT=$(find . -iname "$KT" | head -n 1)
-            if [ -n "$FOUND_KT" ] && [ "$FOUND_KT" != "./app/src/main/java/com/em/client/$KT" ]; then
-              cp "$FOUND_KT" "app/src/main/java/com/em/client/$KT"
-            fi
-          done
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "EM-Client"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.3.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.em.client'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.em.client"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+              buildFeatures {
+                  compose true
+              }
+              composeOptions {
+                  kotlinCompilerExtensionVersion '1.5.8'
+              }
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+              implementation 'androidx.activity:activity-compose:1.8.2'
+              implementation platform('androidx.compose:compose-bom:2024.02.00')
+              implementation 'androidx.compose.ui:ui'
+              implementation 'androidx.compose.ui:ui-graphics'
+              implementation 'androidx.compose.material3:material3'
+              implementation 'androidx.compose.material:material-icons-extended'
+          }
+          EOF
 
           cat << 'EOF' > gradle.properties
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
@@ -43,6 +96,15 @@ jobs:
           kotlin.code.style=official
           android.nonTransitiveRClass=true
           EOF
+
+          # Copy existing Manifest and Kotlin files from wherever they are in repo
+          MANIFEST=$(find . -iname "AndroidManifest.xml" | head -n 1)
+          [ -n "$MANIFEST" ] && [ "$MANIFEST" != "./app/src/main/AndroidManifest.xml" ] && cp "$MANIFEST" app/src/main/AndroidManifest.xml
+
+          for KT in MainActivity.kt EmVpnService.kt; do
+            FOUND_KT=$(find . -iname "$KT" | head -n 1)
+            [ -n "$FOUND_KT" ] && [ "$FOUND_KT" != "./app/src/main/java/com/em/client/$KT" ] && cp "$FOUND_KT" "app/src/main/java/com/em/client/$KT"
+          done
 
       - name: Build EM CLIENT APK
         run: |
