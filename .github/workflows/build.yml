@@ -19,8 +19,16 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Configure Gradle Properties
+      - name: Auto-Fix Project Structure
         run: |
+          ls -laR
+          if [ ! -f "settings.gradle" ]; then
+            FOUND=$(find . -name "settings.gradle" | head -n 1)
+            if [ -n "$FOUND" ]; then
+              DIR=$(dirname "$FOUND")
+              cp -rn "$DIR"/* .
+            fi
+          fi
           cat << 'EOF' > gradle.properties
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
           android.useAndroidX=true
