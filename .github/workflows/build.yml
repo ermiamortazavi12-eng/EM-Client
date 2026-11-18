@@ -1,4 +1,4 @@
-name: Build & Publish EM CLIENT Releases
+name: Build & Release EM CLIENT Real Core
 
 on:
   push:
@@ -22,7 +22,12 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Configure Multi-Flavor Project (Android 14+, 14-, Universal)
+      - name: Download Real Sing-box Core (libbox)
+        run: |
+          mkdir -p app/libs
+          curl -L -f -o app/libs/libbox.aar https://github.com/SagerNet/sing-box/releases/download/v1.10.1/libbox-1.10.1.aar
+
+      - name: Generate Complete Project with Real Sing-box & RX UI
         run: |
           mkdir -p app/src/main/java/com/em/client
           mkdir -p app/src/main/res/drawable
@@ -41,6 +46,7 @@ jobs:
               repositories {
                   google()
                   mavenCentral()
+                  flatDir { dirs 'app/libs' }
               }
           }
           rootProject.name = "EM-Client"
@@ -65,8 +71,8 @@ jobs:
 
               defaultConfig {
                   applicationId "com.em.client"
-                  versionCode 4
-                  versionName "2.1.0"
+                  versionCode 5
+                  versionName "3.0.0"
               }
 
               flavorDimensions "osTarget"
@@ -76,27 +82,21 @@ jobs:
                       minSdk 34
                       targetSdk 35
                       versionNameSuffix "-Android14Plus"
-                      ndk {
-                          abiFilters "arm64-v8a"
-                      }
+                      ndk { abiFilters "arm64-v8a" }
                   }
                   android14Below {
                       dimension "osTarget"
                       minSdk 24
                       targetSdk 33
                       versionNameSuffix "-Android14Below"
-                      ndk {
-                          abiFilters "armeabi-v7a", "arm64-v8a"
-                      }
+                      ndk { abiFilters "armeabi-v7a", "arm64-v8a" }
                   }
                   universal {
                       dimension "osTarget"
                       minSdk 24
                       targetSdk 34
                       versionNameSuffix "-Universal"
-                      ndk {
-                          abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
-                      }
+                      ndk { abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64" }
                   }
               }
 
@@ -115,6 +115,7 @@ jobs:
               }
           }
           dependencies {
+              implementation fileTree(dir: 'libs', include: ['*.aar', '*.jar'])
               implementation 'androidx.core:core-ktx:1.12.0'
               implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
               implementation 'androidx.activity:activity-compose:1.8.2'
@@ -133,6 +134,7 @@ jobs:
           android.nonTransitiveRClass=true
           EOF
 
+          # Custom Monochrome Liquid Glass Launcher Icon (EM CLIENT)
           cat << 'EOF' > app/src/main/res/drawable/ic_launcher_bg.xml
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp"
@@ -142,8 +144,6 @@ jobs:
               <path android:fillColor="#07090D" android:pathData="M0,0h108v108h-108z"/>
               <path android:strokeColor="#2A3441" android:strokeWidth="1.2"
                   android:pathData="M54,14 A40,40 0 1,1 53.9,14 Z"/>
-              <path android:strokeColor="#64748B" android:strokeWidth="0.6"
-                  android:pathData="M54,20 A34,34 0 1,1 53.9,20 Z"/>
           </vector>
           EOF
 
@@ -155,8 +155,6 @@ jobs:
               android:viewportHeight="108">
               <path android:strokeColor="#FFFFFF" android:strokeWidth="2.4"
                   android:pathData="M54,24 A30,30 0 1,1 53.9,24 Z"/>
-              <path android:strokeColor="#94A3B8" android:strokeWidth="1"
-                  android:pathData="M54,28 A26,26 0 1,1 53.9,28 Z"/>
               <path android:fillColor="#FFFFFF"
                   android:pathData="M35,44 H50 V48 H39.5 V52 H48.5 V56 H39.5 V60 H50 V64 H35 Z"/>
               <path android:fillColor="#FFFFFF"
@@ -178,6 +176,7 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -216,6 +215,184 @@ jobs:
           </manifest>
           EOF
 
+          # Config Parser (Converts VLESS / VMess / WireGuard URIs into Sing-box JSON)
+          cat << 'EOF' > app/src/main/java/com/em/client/SingBoxConfigBuilder.kt
+          package com.em.client
+
+          import android.net.Uri
+          import android.util.Base64
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          object SingBoxConfigBuilder {
+
+              fun buildSingBoxJson(rawInput: String): String {
+                  val trimmed = rawInput.trim()
+                  if (trimmed.startsWith("{")) return trimmed
+
+                  val outbound = when {
+                      trimmed.startsWith("vless://", true) -> parseVless(trimmed)
+                      trimmed.startsWith("vmess://", true) -> parseVmess(trimmed)
+                      trimmed.contains("[Interface]", true) || trimmed.startsWith("wg://", true) -> parseWireGuard(trimmed)
+                      else -> throw IllegalArgumentException("فرمت کانفیگ پشتیبانی نمی‌شود")
+                  }
+
+                  val root = JSONObject()
+                  root.put("log", JSONObject().put("level", "error"))
+
+                  val dns = JSONObject()
+                      .put("servers", JSONArray()
+                          .put(JSONObject().put("tag", "google").put("address", "https://8.8.8.8/dns-query").put("detour", "proxy"))
+                          .put(JSONObject().put("tag", "local").put("address", "223.5.5.5").put("detour", "direct"))
+                      )
+                  root.put("dns", dns)
+
+                  val tunInbound = JSONObject()
+                      .put("type", "tun")
+                      .put("tag", "tun-in")
+                      .put("inet4_address", "172.19.0.1/30")
+                      .put("mtu", 1500)
+                      .put("auto_route", true)
+                      .put("strict_route", false)
+                      .put("sniff", true)
+
+                  root.put("inbounds", JSONArray().put(tunInbound))
+
+                  val outbounds = JSONArray()
+                      .put(outbound)
+                      .put(JSONObject().put("type", "direct").put("tag", "direct"))
+                      .put(JSONObject().put("type", "dns").put("tag", "dns-out"))
+                  root.put("outbounds", outbounds)
+
+                  val route = JSONObject()
+                      .put("auto_detect_interface", true)
+                      .put("rules", JSONArray()
+                          .put(JSONObject().put("protocol", "dns").put("outbound", "dns-out"))
+                      )
+                  root.put("route", route)
+
+                  return root.toString(2)
+              }
+
+              private fun parseVless(uriStr: String): JSONObject {
+                  val uri = Uri.parse(uriStr)
+                  val uuid = uri.userInfo ?: ""
+                  val host = uri.host ?: ""
+                  val port = if (uri.port > 0) uri.port else 443
+                  val security = uri.getQueryParameter("security") ?: "none"
+                  val sni = uri.getQueryParameter("sni") ?: uri.getQueryParameter("peer") ?: host
+                  val fp = uri.getQueryParameter("fp") ?: "chrome"
+                  val type = uri.getQueryParameter("type") ?: "tcp"
+                  val path = uri.getQueryParameter("path") ?: "/"
+                  val hostHeader = uri.getQueryParameter("host") ?: sni
+                  val pbk = uri.getQueryParameter("pbk") ?: ""
+                  val sid = uri.getQueryParameter("sid") ?: ""
+
+                  val out = JSONObject()
+                      .put("type", "vless")
+                      .put("tag", "proxy")
+                      .put("server", host)
+                      .put("server_port", port)
+                      .put("uuid", uuid)
+
+                  if (security == "tls" || security == "reality") {
+                      val tls = JSONObject()
+                          .put("enabled", true)
+                          .put("server_name", sni)
+                          .put("utls", JSONObject().put("enabled", true).put("fingerprint", fp))
+                      if (security == "reality") {
+                          tls.put("reality", JSONObject().put("enabled", true).put("public_key", pbk).put("short_id", sid))
+                      }
+                      out.put("tls", tls)
+                  }
+
+                  when (type) {
+                      "ws" -> {
+                          val transport = JSONObject().put("type", "ws").put("path", path)
+                          if (hostHeader.isNotEmpty()) {
+                              transport.put("headers", JSONObject().put("Host", hostHeader))
+                          }
+                          out.put("transport", transport)
+                      }
+                      "grpc" -> {
+                          val serviceName = uri.getQueryParameter("serviceName") ?: ""
+                          out.put("transport", JSONObject().put("type", "grpc").put("service_name", serviceName))
+                      }
+                  }
+                  return out
+              }
+
+              private fun parseVmess(uriStr: String): JSONObject {
+                  val b64 = uriStr.removePrefix("vmess://").substringBefore("#").trim()
+                  val decoded = String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8)
+                  val j = JSONObject(decoded)
+                  val host = j.optString("add")
+                  val port = j.optInt("port", 443)
+                  val uuid = j.optString("id")
+                  val aid = j.optInt("aid", 0)
+                  val net = j.optString("net", "tcp")
+                  val tlsMode = j.optString("tls", "")
+                  val sni = j.optString("sni").ifBlank { j.optString("host").ifBlank { host } }
+                  val path = j.optString("path", "/")
+                  val hostHeader = j.optString("host", sni)
+
+                  val out = JSONObject()
+                      .put("type", "vmess")
+                      .put("tag", "proxy")
+                      .put("server", host)
+                      .put("server_port", port)
+                      .put("uuid", uuid)
+                      .put("alter_id", aid)
+                      .put("security", "auto")
+
+                  if (tlsMode == "tls") {
+                      out.put("tls", JSONObject().put("enabled", true).put("server_name", sni))
+                  }
+                  if (net == "ws") {
+                      val transport = JSONObject().put("type", "ws").put("path", path)
+                      if (hostHeader.isNotEmpty()) {
+                          transport.put("headers", JSONObject().put("Host", hostHeader))
+                      }
+                      out.put("transport", transport)
+                  }
+                  return out
+              }
+
+              private fun parseWireGuard(conf: String): JSONObject {
+                  var privateKey = ""
+                  var address = "10.0.0.2/32"
+                  var peerPublicKey = ""
+                  var endpointHost = ""
+                  var endpointPort = 51820
+
+                  conf.lines().forEach { rawLine ->
+                      val line = rawLine.trim()
+                      when {
+                          line.startsWith("PrivateKey", true) -> privateKey = line.substringAfter("=").trim()
+                          line.startsWith("Address", true) -> address = line.substringAfter("=").substringBefore(",").trim()
+                          line.startsWith("PublicKey", true) -> peerPublicKey = line.substringAfter("=").trim()
+                          line.startsWith("Endpoint", true) -> {
+                              val ep = line.substringAfter("=").trim()
+                              endpointHost = ep.substringBeforeLast(":")
+                              endpointPort = ep.substringAfterLast(":").toIntOrNull() ?: 51820
+                          }
+                      }
+                  }
+
+                  return JSONObject()
+                      .put("type", "wireguard")
+                      .put("tag", "proxy")
+                      .put("server", endpointHost)
+                      .put("server_port", endpointPort)
+                      .put("local_address", JSONArray().put(address))
+                      .put("private_key", privateKey)
+                      .put("peer_public_key", peerPublicKey)
+                      .put("mtu", 1420)
+              }
+          }
+          EOF
+
+          # Real Sing-box VPN Service Implementation
           cat << 'EOF' > app/src/main/java/com/em/client/EmVpnService.kt
           package com.em.client
 
@@ -226,36 +403,67 @@ jobs:
           import android.net.VpnService
           import android.os.Build
           import android.os.ParcelFileDescriptor
+          import android.util.Log
           import androidx.core.app.NotificationCompat
           import androidx.core.app.ServiceCompat
+          import io.nekohasekai.libbox.BoxService
+          import io.nekohasekai.libbox.InterfaceUpdateListener
+          import io.nekohasekai.libbox.Libbox
+          import io.nekohasekai.libbox.LocalDNSTransport
+          import io.nekohasekai.libbox.NetworkInterfaceIterator
+          import io.nekohasekai.libbox.PlatformInterface
+          import io.nekohasekai.libbox.SetupOptions
+          import io.nekohasekai.libbox.StringIterator
+          import io.nekohasekai.libbox.TunOptions
+          import io.nekohasekai.libbox.WIFIState
+          import java.io.File
 
-          class EmVpnService : VpnService() {
+          class EmVpnService : VpnService(), PlatformInterface {
               private var vpnInterface: ParcelFileDescriptor? = null
+              private var boxService: BoxService? = null
 
               companion object {
                   const val ACTION_CONNECT = "com.em.client.CONNECT"
                   const val ACTION_DISCONNECT = "com.em.client.DISCONNECT"
                   var isRunning = false
-                  var currentConfig = ""
+                  var lastError: String? = null
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val baseDir = File(filesDir, "sing-box").apply { mkdirs() }
+                  val workDir = File(baseDir, "work").apply { mkdirs() }
+                  val tempDir = File(cacheDir, "sing-box-tmp").apply { mkdirs() }
+                  val options = SetupOptions().apply {
+                      basePath = baseDir.absolutePath
+                      workingPath = workDir.absolutePath
+                      tempPath = tempDir.absolutePath
+                  }
+                  try {
+                      Libbox.setup(options)
+                  } catch (e: Exception) {
+                      Log.e("EM_VPN", "Libbox setup error", e)
+                  }
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   when (intent?.action) {
                       ACTION_CONNECT -> {
-                          currentConfig = intent.getStringExtra("CONFIG") ?: ""
-                          startVpnTunnel()
+                          val rawConfig = intent.getStringExtra("CONFIG") ?: ""
+                          startSingBoxTunnel(rawConfig)
                       }
-                      ACTION_DISCONNECT -> stopVpnTunnel()
+                      ACTION_DISCONNECT -> stopSingBoxTunnel()
                   }
                   return START_STICKY
               }
 
-              private fun startVpnTunnel() {
-                  if (isRunning) return
+              private fun startSingBoxTunnel(rawConfig: String) {
+                  if (isRunning) stopSingBoxTunnel()
+                  lastError = null
                   createNotificationChannel()
                   val notification = NotificationCompat.Builder(this, "EM_VPN_CHANNEL")
                       .setContentTitle("EM CLIENT")
-                      .setContentText("متصل • تونل امن Liquid Glass فعال است")
+                      .setContentText("متصل • هسته Sing-box فعال است")
                       .setSmallIcon(android.R.drawable.ic_lock_lock)
                       .setOngoing(true)
                       .build()
@@ -269,26 +477,64 @@ jobs:
                       startForeground(1, notification)
                   }
 
-                  val builder = Builder()
-                      .setSession("EM CLIENT")
-                      .setMtu(1500)
-                      .addAddress("172.19.0.1", 30)
-                      .addDnsServer("1.1.1.1")
-                      .addRoute("0.0.0.0", 0)
-
-                  try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
-
-                  vpnInterface = builder.establish()
-                  isRunning = vpnInterface != null
+                  try {
+                      val jsonConfig = SingBoxConfigBuilder.buildSingBoxJson(rawConfig)
+                      val service = Libbox.newService(jsonConfig, this)
+                      service.start()
+                      boxService = service
+                      isRunning = true
+                  } catch (e: Exception) {
+                      lastError = e.message ?: "خطا در اتصال هسته"
+                      Log.e("EM_VPN", "Start failed", e)
+                      stopSingBoxTunnel()
+                  }
               }
 
-              private fun stopVpnTunnel() {
+              private fun stopSingBoxTunnel() {
                   isRunning = false
+                  try { boxService?.close() } catch (_: Exception) {}
+                  boxService = null
                   try { vpnInterface?.close() } catch (_: Exception) {}
                   vpnInterface = null
                   stopForeground(STOP_FOREGROUND_REMOVE)
                   stopSelf()
               }
+
+              override fun openTun(options: TunOptions): Int {
+                  val builder = Builder()
+                      .setSession("EM CLIENT")
+                      .setMtu(options.mtu)
+                      .addAddress("172.19.0.1", 30)
+                      .addDnsServer("8.8.8.8")
+                      .addRoute("0.0.0.0", 0)
+
+                  try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
+
+                  val pfd = builder.establish() ?: throw IllegalStateException("Cannot establish TUN")
+                  vpnInterface = pfd
+                  return pfd.fd
+              }
+
+              override fun autoDetectInterfaceControl(fd: Int) {
+                  protect(fd)
+              }
+
+              override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
+              override fun useProcFS(): Boolean = false
+              override fun findConnectionOwner(p0: Int, p1: String?, p2: Int, p3: String?, p4: Int): Int = -1
+              override fun packageNameByUid(uid: Int): String = packageManager.getNameForUid(uid) ?: ""
+              override fun uidByPackageName(pkg: String): Int = try { packageManager.getApplicationInfo(pkg, 0).uid } catch (_: Exception) { -1 }
+              override fun startDefaultInterfaceMonitor(p0: InterfaceUpdateListener?) {}
+              override fun closeDefaultInterfaceMonitor(p0: InterfaceUpdateListener?) {}
+              override fun getInterfaces(): NetworkInterfaceIterator? = null
+              override fun underNetworkExtension(): Boolean = false
+              override fun includeAllNetworks(): Boolean = false
+              override fun clearDNSCache() {}
+              override fun readWIFIState(): WIFIState? = null
+              override fun localDNSTransport(): LocalDNSTransport? = null
+              override fun systemCertificates(): StringIterator? = null
+              override fun writeLog(message: String?) { Log.d("SingBox", message ?: "") }
+              override fun sendNotification(p0: io.nekohasekai.libbox.Notification?) {}
 
               private fun createNotificationChannel() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -301,16 +547,808 @@ jobs:
               }
 
               override fun onDestroy() {
-                  stopVpnTunnel()
+                  stopSingBoxTunnel()
                   super.onDestroy()
               }
           }
           EOF
 
-          FOUND_MAIN=$(find . -iname "MainActivity.kt" | head -n 1)
-          if [ -n "$FOUND_MAIN" ] && [ "$FOUND_MAIN" != "./app/src/main/java/com/em/client/MainActivity.kt" ]; then
-            cp "$FOUND_MAIN" app/src/main/java/com/em/client/MainActivity.kt
-          fi
+          # New RX-Inspired Liquid Glass UI (Overwrites old MainActivity completely)
+          cat << 'EOF' > app/src/main/java/com/em/client/MainActivity.kt
+          package com.em.client
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.VpnService
+          import android.os.Bundle
+          import android.widget.Toast
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.animation.AnimatedVisibility
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.rounded.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalClipboardManager
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalLayoutDirection
+          import androidx.compose.ui.text.AnnotatedString
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.LayoutDirection
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import java.net.InetSocketAddress
+          import java.net.Socket
+
+          data class ConfigNode(
+              val id: String,
+              val name: String,
+              val protocol: String,
+              val host: String,
+              val port: Int,
+              val rawUri: String,
+              val isSub: Boolean = false,
+              var pingMs: Int = 0
+          )
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                          EmClientProApp()
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun EmClientProApp() {
+              val context = LocalContext.current
+              val clipboard = LocalClipboardManager.current
+              val scope = rememberCoroutineScope()
+              val drawerState = rememberDrawerState(DrawerValue.Closed)
+
+              var isConnected by remember { mutableStateOf(EmVpnService.isRunning) }
+              var selectedTab by remember { mutableIntStateOf(0) }
+              var showSearch by remember { mutableStateOf(false) }
+              var searchQuery by remember { mutableStateOf("") }
+              var showAddMenu by remember { mutableStateOf(false) }
+              var showMoreMenu by remember { mutableStateOf(false) }
+              var showManualDialog by remember { mutableStateOf(false) }
+              var manualInput by remember { mutableStateOf("") }
+
+              val configs = remember { mutableStateListOf<ConfigNode>() }
+              var selectedId by remember { mutableStateOf<String?>(null) }
+
+              val filePicker = rememberLauncherForActivityResult(
+                  ActivityResultContracts.GetContent()
+              ) { uri ->
+                  uri?.let {
+                      try {
+                          val text = context.contentResolver.openInputStream(it)?.bufferedReader()?.use { r -> r.readText() } ?: ""
+                          if (text.isNotBlank()) {
+                              if (text.contains("[Interface]", true)) {
+                                  val node = parseUriToNode(text, selectedTab == 1)
+                                  configs.add(0, node)
+                                  selectedId = node.id
+                              } else {
+                                  val lines = text.lines().map { l -> l.trim() }.filter { l -> l.isNotEmpty() }
+                                  lines.forEach { line -> configs.add(parseUriToNode(line, selectedTab == 1)) }
+                                  if (selectedId == null && configs.isNotEmpty()) selectedId = configs.first().id
+                              }
+                              Toast.makeText(context, "کانفیگ از فایل اضافه شد", Toast.LENGTH_SHORT).show()
+                          }
+                      } catch (_: Exception) {
+                          Toast.makeText(context, "خطا در خواندن فایل", Toast.LENGTH_SHORT).show()
+                      }
+                  }
+              }
+
+              val vpnPermissionLauncher = rememberLauncherForActivityResult(
+                  ActivityResultContracts.StartActivityForResult()
+              ) { result ->
+                  if (result.resultCode == Activity.RESULT_OK) {
+                      val activeNode = configs.find { it.id == selectedId }
+                      val intent = Intent(context, EmVpnService::class.java).apply {
+                          action = EmVpnService.ACTION_CONNECT
+                          putExtra("CONFIG", activeNode?.rawUri ?: "")
+                      }
+                      context.startForegroundService(intent)
+                      scope.launch {
+                          delay(500)
+                          isConnected = EmVpnService.isRunning
+                          if (!isConnected && EmVpnService.lastError != null) {
+                              Toast.makeText(context, EmVpnService.lastError, Toast.LENGTH_LONG).show()
+                          }
+                      }
+                  }
+              }
+
+              fun importFromClipboard() {
+                  val clip = clipboard.getText()?.text?.trim() ?: ""
+                  if (clip.isEmpty()) {
+                      Toast.makeText(context, "کلیپ‌بورد خالی است!", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  if (clip.contains("[Interface]", true)) {
+                      val node = parseUriToNode(clip, selectedTab == 1)
+                      configs.add(0, node)
+                      selectedId = node.id
+                      Toast.makeText(context, "کانفیگ WireGuard وارد شد", Toast.LENGTH_SHORT).show()
+                  } else {
+                      val lines = clip.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                      lines.forEach { line -> configs.add(0, parseUriToNode(line, selectedTab == 1)) }
+                      if (configs.isNotEmpty()) selectedId = configs.first().id
+                      Toast.makeText(context, "${lines.size} کانفیگ وارد شد", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              fun testAllPings() {
+                  if (configs.isEmpty()) {
+                      Toast.makeText(context, "کانفیگی برای تست وجود ندارد", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  scope.launch {
+                      Toast.makeText(context, "در حال تست پینگ سرورها...", Toast.LENGTH_SHORT).show()
+                      for (i in configs.indices) {
+                          val item = configs[i]
+                          val latency = withContext(Dispatchers.IO) {
+                              try {
+                                  val start = System.currentTimeMillis()
+                                  Socket().use { s -> s.connect(InetSocketAddress(item.host, item.port), 1500) }
+                                  (System.currentTimeMillis() - start).toInt()
+                              } catch (_: Exception) {
+                                  -1
+                              }
+                          }
+                          configs[i] = item.copy(pingMs = latency)
+                      }
+                      Toast.makeText(context, "تست پینگ انجام شد", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              fun toggleConnection() {
+                  if (isConnected) {
+                      val intent = Intent(context, EmVpnService::class.java).apply {
+                          action = EmVpnService.ACTION_DISCONNECT
+                      }
+                      context.startService(intent)
+                      isConnected = false
+                  } else {
+                      if (configs.isEmpty()) {
+                          Toast.makeText(context, "ابتدا یک کانفیگ اضافه کنید", Toast.LENGTH_SHORT).show()
+                          return
+                      }
+                      val activeNode = configs.find { it.id == selectedId } ?: configs.first()
+                      selectedId = activeNode.id
+                      val prepareIntent = VpnService.prepare(context)
+                      if (prepareIntent != null) {
+                          vpnPermissionLauncher.launch(prepareIntent)
+                      } else {
+                          val intent = Intent(context, EmVpnService::class.java).apply {
+                              action = EmVpnService.ACTION_CONNECT
+                              putExtra("CONFIG", activeNode.rawUri)
+                          }
+                          context.startForegroundService(intent)
+                          scope.launch {
+                              delay(500)
+                              isConnected = EmVpnService.isRunning
+                              if (!isConnected && EmVpnService.lastError != null) {
+                                  Toast.makeText(context, EmVpnService.lastError, Toast.LENGTH_LONG).show()
+                              }
+                          }
+                      }
+                  }
+              }
+
+              ModalNavigationDrawer(
+                  drawerState = drawerState,
+                  drawerContent = {
+                      ModalDrawerSheet(
+                          drawerContainerColor = Color(0xFF0E1014),
+                          modifier = Modifier.width(290.dp)
+                      ) {
+                          Column(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .padding(24.dp),
+                              horizontalAlignment = Alignment.CenterHorizontally
+                          ) {
+                              Box(
+                                  modifier = Modifier
+                                      .size(76.dp)
+                                      .clip(RoundedCornerShape(20.dp))
+                                      .background(Color(0xFF15181E))
+                                      .border(1.5.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(20.dp)),
+                                  contentAlignment = Alignment.Center
+                              ) {
+                                  Text("EM", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black)
+                              }
+                              Spacer(modifier = Modifier.height(12.dp))
+                              Text("EM CLIENT", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                              Text("هسته Sing-box • VLESS / VMess / WG", color = Color.Gray, fontSize = 11.sp)
+                          }
+
+                          Divider(color = Color.White.copy(alpha = 0.08f))
+                          Spacer(modifier = Modifier.height(12.dp))
+
+                          DrawerGlassButton("پشتیبان‌گیری در کلیپ‌بورد", Icons.Rounded.Backup) {
+                              val allRaw = configs.joinToString("\n") { it.rawUri }
+                              clipboard.setText(AnnotatedString(allRaw))
+                              Toast.makeText(context, "بکاپ تمام کانفیگ‌ها کپی شد", Toast.LENGTH_SHORT).show()
+                              scope.launch { drawerState.close() }
+                          }
+
+                          DrawerGlassButton("بازیابی از کلیپ‌بورد", Icons.Rounded.Restore) {
+                              importFromClipboard()
+                              scope.launch { drawerState.close() }
+                          }
+
+                          DrawerGlassButton("نسخه برنامه: 3.0.0 (Sing-box Core)", Icons.Rounded.Info) {
+                              scope.launch { drawerState.close() }
+                          }
+                      }
+                  }
+              ) {
+                  Box(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .background(
+                              Brush.verticalGradient(
+                                  colors = listOf(Color(0xFF060709), Color(0xFF101318), Color(0xFF050608))
+                              )
+                          )
+                          .padding(16.dp)
+                  ) {
+                      Column(modifier = Modifier.fillMaxSize()) {
+                          Row(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .padding(vertical = 4.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.SpaceBetween
+                          ) {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                      Icon(Icons.Rounded.Menu, contentDescription = "Menu", tint = Color.White)
+                                  }
+                                  Text(
+                                      text = "EM CLIENT",
+                                      color = Color.White,
+                                      fontSize = 19.sp,
+                                      fontWeight = FontWeight.Bold,
+                                      letterSpacing = 1.5.sp
+                                  )
+                              }
+
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  IconButton(onClick = { showSearch = !showSearch }) {
+                                      Icon(Icons.Rounded.Search, contentDescription = "Search", tint = Color.White)
+                                  }
+
+                                  Box {
+                                      IconButton(onClick = { showAddMenu = true }) {
+                                          Icon(Icons.Rounded.Add, contentDescription = "Add", tint = Color.White)
+                                      }
+                                      DropdownMenu(
+                                          expanded = showAddMenu,
+                                          onDismissRequest = { showAddMenu = false },
+                                          containerColor = Color(0xFF161920)
+                                      ) {
+                                          DropdownMenuItem(
+                                              text = { Text("کانفیگ را از کلیپ‌بورد وارد کن", color = Color.White) },
+                                              leadingIcon = { Icon(Icons.Rounded.ContentPaste, null, tint = Color.White) },
+                                              onClick = {
+                                                  showAddMenu = false
+                                                  importFromClipboard()
+                                              }
+                                          )
+                                          DropdownMenuItem(
+                                              text = { Text("وارد کردن دستی کانفیگ", color = Color.White) },
+                                              leadingIcon = { Icon(Icons.Rounded.QrCodeScanner, null, tint = Color.White) },
+                                              onClick = {
+                                                  showAddMenu = false
+                                                  showManualDialog = true
+                                              }
+                                          )
+                                          DropdownMenuItem(
+                                              text = { Text("کانفیگ از طریق فایل", color = Color.White) },
+                                              leadingIcon = { Icon(Icons.Rounded.NoteAdd, null, tint = Color.White) },
+                                              onClick = {
+                                                  showAddMenu = false
+                                                  filePicker.launch("*/*")
+                                              }
+                                          )
+                                      }
+                                  }
+
+                                  Box {
+                                      IconButton(onClick = { showMoreMenu = true }) {
+                                          Icon(Icons.Rounded.MoreVert, contentDescription = "More", tint = Color.White)
+                                      }
+                                      DropdownMenu(
+                                          expanded = showMoreMenu,
+                                          onDismissRequest = { showMoreMenu = false },
+                                          containerColor = Color(0xFF161920)
+                                      ) {
+                                          DropdownMenuItem(
+                                              text = { Text("اتصال دوباره کانفیگ", color = Color.White) },
+                                              onClick = {
+                                                  showMoreMenu = false
+                                                  if (isConnected) { toggleConnection(); toggleConnection() }
+                                              }
+                                          )
+                                          DropdownMenuItem(
+                                              text = { Text("حذف کل کانفیگ‌ها", color = Color.White) },
+                                              onClick = {
+                                                  showMoreMenu = false
+                                                  configs.clear()
+                                                  selectedId = null
+                                              }
+                                          )
+                                          DropdownMenuItem(
+                                              text = { Text("حذف کانفیگ‌های تکراری", color = Color.White) },
+                                              onClick = {
+                                                  showMoreMenu = false
+                                                  val unique = configs.distinctBy { it.rawUri }
+                                                  configs.clear()
+                                                  configs.addAll(unique)
+                                              }
+                                          )
+                                          DropdownMenuItem(
+                                              text = { Text("حذف کانفیگ منفی، اول پینگ بگیر", color = Color.White) },
+                                              onClick = {
+                                                  showMoreMenu = false
+                                                  configs.removeAll { it.pingMs < 0 }
+                                                  configs.sortBy { if (it.pingMs <= 0) Int.MAX_VALUE else it.pingMs }
+                                              }
+                                          )
+                                          DropdownMenuItem(
+                                              text = { Text("کپی تمام کانفیگ‌ها", color = Color.White) },
+                                              onClick = {
+                                                  showMoreMenu = false
+                                                  clipboard.setText(AnnotatedString(configs.joinToString("\n") { it.rawUri }))
+                                              }
+                                          )
+                                      }
+                                  }
+                              }
+                          }
+
+                          AnimatedVisibility(visible = showSearch) {
+                              OutlinedTextField(
+                                  value = searchQuery,
+                                  onValueChange = { searchQuery = it },
+                                  placeholder = { Text("جستجو در کانفیگ‌ها...", color = Color.Gray) },
+                                  singleLine = true,
+                                  colors = OutlinedTextFieldDefaults.colors(
+                                      focusedTextColor = Color.White,
+                                      unfocusedTextColor = Color.White,
+                                      focusedBorderColor = Color.White,
+                                      unfocusedBorderColor = Color.White.copy(alpha = 0.2f)
+                                  ),
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .padding(bottom = 10.dp),
+                                  shape = RoundedCornerShape(16.dp)
+                              )
+                          }
+
+                          val normalCount = configs.count { !it.isSub }
+                          val subCount = configs.count { it.isSub }
+                          Row(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .clip(RoundedCornerShape(24.dp))
+                                  .background(Color.White.copy(alpha = 0.05f))
+                                  .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
+                                  .padding(4.dp)
+                          ) {
+                              GlassTab("کانفیگ‌های عادی", normalCount, selectedTab == 0, Modifier.weight(1f)) { selectedTab = 0 }
+                              GlassTab("اشتراک / ساب", subCount, selectedTab == 1, Modifier.weight(1f)) { selectedTab = 1 }
+                          }
+
+                          Spacer(modifier = Modifier.height(14.dp))
+
+                          val filteredList = configs.filter {
+                              (if (selectedTab == 0) !it.isSub else it.isSub) &&
+                                  it.name.contains(searchQuery, ignoreCase = true)
+                          }
+
+                          Box(modifier = Modifier.weight(1f)) {
+                              if (filteredList.isEmpty()) {
+                                  Column(
+                                      modifier = Modifier
+                                          .fillMaxSize()
+                                          .clip(RoundedCornerShape(28.dp))
+                                          .background(Color.White.copy(alpha = 0.04f))
+                                          .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(28.dp))
+                                          .padding(24.dp),
+                                      horizontalAlignment = Alignment.CenterHorizontally,
+                                      verticalArrangement = Arrangement.Center
+                                  ) {
+                                      Box(
+                                          modifier = Modifier
+                                              .size(84.dp)
+                                              .clip(CircleShape)
+                                              .background(Color.White.copy(alpha = 0.08f))
+                                              .border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape),
+                                          contentAlignment = Alignment.Center
+                                      ) {
+                                          Text("EM", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Black)
+                                      }
+                                      Spacer(modifier = Modifier.height(18.dp))
+                                      Text("هنوز کانفیگی اضافه نشده", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                      Spacer(modifier = Modifier.height(8.dp))
+                                      Text(
+                                          "فایل کانفیگ را وارد کن یا لینک کپی‌شده را بچسبان؛ بعد یک سرور انتخاب کن و متصل شو.",
+                                          color = Color.Gray,
+                                          fontSize = 13.sp,
+                                          lineHeight = 20.sp
+                                      )
+                                      Spacer(modifier = Modifier.height(24.dp))
+                                      Button(
+                                          onClick = { showManualDialog = true },
+                                          colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                                          shape = RoundedCornerShape(22.dp),
+                                          modifier = Modifier.fillMaxWidth().height(50.dp)
+                                      ) {
+                                          Icon(Icons.Rounded.Add, null, tint = Color.Black)
+                                          Spacer(modifier = Modifier.width(8.dp))
+                                          Text("افزودن کانفیگ", color = Color.Black, fontWeight = FontWeight.Bold)
+                                      }
+                                      Spacer(modifier = Modifier.height(12.dp))
+                                      OutlinedButton(
+                                          onClick = { importFromClipboard() },
+                                          shape = RoundedCornerShape(22.dp),
+                                          modifier = Modifier.fillMaxWidth().height(50.dp)
+                                      ) {
+                                          Icon(Icons.Rounded.ContentPaste, null, tint = Color.White)
+                                          Spacer(modifier = Modifier.width(8.dp))
+                                          Text("کانفیگ را از کلیپ‌بورد وارد کنید", color = Color.White)
+                                      }
+                                  }
+                              } else {
+                                  LazyColumn(
+                                      modifier = Modifier.fillMaxSize(),
+                                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                                  ) {
+                                      items(filteredList) { node ->
+                                          val isSelected = node.id == selectedId
+                                          Row(
+                                              modifier = Modifier
+                                                  .fillMaxWidth()
+                                                  .clip(RoundedCornerShape(20.dp))
+                                                  .background(
+                                                      if (isSelected) Color.White.copy(alpha = 0.14f)
+                                                      else Color.White.copy(alpha = 0.05f)
+                                                  )
+                                                  .border(
+                                                      width = if (isSelected) 1.5.dp else 1.dp,
+                                                      color = if (isSelected) Color.White else Color.White.copy(alpha = 0.1f),
+                                                      shape = RoundedCornerShape(20.dp)
+                                                  )
+                                                  .clickable { selectedId = node.id }
+                                                  .padding(14.dp),
+                                              verticalAlignment = Alignment.CenterVertically,
+                                              horizontalArrangement = Arrangement.SpaceBetween
+                                          ) {
+                                              Column(modifier = Modifier.weight(1f)) {
+                                                  Text(
+                                                      text = node.name,
+                                                      color = Color.White,
+                                                      fontWeight = FontWeight.SemiBold,
+                                                      fontSize = 14.sp,
+                                                      maxLines = 1,
+                                                      overflow = TextOverflow.Ellipsis
+                                                  )
+                                                  Spacer(modifier = Modifier.height(4.dp))
+                                                  Row(verticalAlignment = Alignment.CenterVertically) {
+                                                      Text(
+                                                          text = node.protocol,
+                                                          color = Color.Black,
+                                                          fontSize = 10.sp,
+                                                          fontWeight = FontWeight.Bold,
+                                                          modifier = Modifier
+                                                              .clip(RoundedCornerShape(6.dp))
+                                                              .background(Color.White)
+                                                              .padding(horizontal = 7.dp, vertical = 2.dp)
+                                                      )
+                                                      Spacer(modifier = Modifier.width(8.dp))
+                                                      Text(
+                                                          text = "${node.host}:${node.port}",
+                                                          color = Color.Gray,
+                                                          fontSize = 11.sp,
+                                                          fontFamily = FontFamily.Monospace
+                                                      )
+                                                  }
+                                              }
+                                              Text(
+                                                  text = when {
+                                                      node.pingMs > 0 -> "${node.pingMs} ms"
+                                                      node.pingMs < 0 -> "Timeout"
+                                                      else -> "-- ms"
+                                                  },
+                                                  color = if (node.pingMs < 0) Color.Gray else Color.White,
+                                                  fontFamily = FontFamily.Monospace,
+                                                  fontSize = 12.sp
+                                              )
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+
+                          Spacer(modifier = Modifier.height(14.dp))
+
+                          Column(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .clip(RoundedCornerShape(26.dp))
+                                  .background(Color.White.copy(alpha = 0.05f))
+                                  .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(26.dp))
+                                  .padding(14.dp)
+                          ) {
+                              Row(
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .padding(bottom = 10.dp, start = 6.dp, end = 6.dp),
+                                  horizontalArrangement = Arrangement.SpaceBetween,
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Row(verticalAlignment = Alignment.CenterVertically) {
+                                      Box(
+                                          modifier = Modifier
+                                              .size(8.dp)
+                                              .clip(CircleShape)
+                                              .background(if (isConnected) Color.White else Color.Gray)
+                                      )
+                                      Spacer(modifier = Modifier.width(8.dp))
+                                      Text(
+                                          text = if (isConnected) "متصل به هسته Sing-box" else "متصل نیست",
+                                          color = if (isConnected) Color.White else Color.Gray,
+                                          fontSize = 12.sp
+                                      )
+                                  }
+                                  val currentName = configs.find { it.id == selectedId }?.name ?: ""
+                                  if (currentName.isNotEmpty()) {
+                                      Text(
+                                          text = currentName,
+                                          color = Color.White.copy(alpha = 0.7f),
+                                          fontSize = 11.sp,
+                                          maxLines = 1,
+                                          overflow = TextOverflow.Ellipsis,
+                                          modifier = Modifier.widthIn(max = 150.dp)
+                                      )
+                                  }
+                              }
+
+                              Row(
+                                  modifier = Modifier.fillMaxWidth(),
+                                  horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Button(
+                                      onClick = { toggleConnection() },
+                                      colors = ButtonDefaults.buttonColors(
+                                          containerColor = if (isConnected) Color(0xFF1F242D) else Color.White
+                                      ),
+                                      shape = RoundedCornerShape(20.dp),
+                                      modifier = Modifier.weight(1f).height(54.dp)
+                                  ) {
+                                      Icon(
+                                          Icons.Rounded.PowerSettingsNew,
+                                          contentDescription = null,
+                                          tint = if (isConnected) Color.White else Color.Black
+                                      )
+                                      Spacer(modifier = Modifier.width(8.dp))
+                                      Text(
+                                          text = if (isConnected) "قطع اتصال" else "اتصال",
+                                          color = if (isConnected) Color.White else Color.Black,
+                                          fontSize = 16.sp,
+                                          fontWeight = FontWeight.Bold
+                                      )
+                                  }
+
+                                  Box(
+                                      modifier = Modifier
+                                          .size(54.dp)
+                                          .clip(RoundedCornerShape(18.dp))
+                                          .background(Color.White.copy(alpha = 0.08f))
+                                          .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(18.dp))
+                                          .clickable { testAllPings() },
+                                      contentAlignment = Alignment.Center
+                                  ) {
+                                      Icon(Icons.Rounded.Bolt, contentDescription = "Ping All", tint = Color.White)
+                                  }
+
+                                  Box(
+                                      modifier = Modifier
+                                          .size(54.dp)
+                                          .clip(RoundedCornerShape(18.dp))
+                                          .background(Color.White.copy(alpha = 0.08f))
+                                          .border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(18.dp))
+                                          .clickable { scope.launch { drawerState.open() } },
+                                      contentAlignment = Alignment.Center
+                                  ) {
+                                      Icon(Icons.Rounded.GridView, contentDescription = "Menu", tint = Color.White)
+                                  }
+                              }
+                          }
+                      }
+
+                      if (showManualDialog) {
+                          AlertDialog(
+                              onDismissRequest = { showManualDialog = false },
+                              containerColor = Color(0xFF14171D),
+                              title = { Text("افزودن کانفیگ (VLESS / VMess / WireGuard)", color = Color.White, fontSize = 15.sp) },
+                              text = {
+                                  OutlinedTextField(
+                                      value = manualInput,
+                                      onValueChange = { manualInput = it },
+                                      placeholder = { Text("vless://... یا [Interface]...", color = Color.Gray) },
+                                      colors = OutlinedTextFieldDefaults.colors(
+                                          focusedTextColor = Color.White,
+                                          unfocusedTextColor = Color.White,
+                                          focusedBorderColor = Color.White
+                                      ),
+                                      modifier = Modifier.fillMaxWidth().height(130.dp)
+                                  )
+                              },
+                              confirmButton = {
+                                  Button(
+                                      onClick = {
+                                          val trimmed = manualInput.trim()
+                                          if (trimmed.contains("[Interface]", true)) {
+                                              val node = parseUriToNode(trimmed, selectedTab == 1)
+                                              configs.add(0, node)
+                                              selectedId = node.id
+                                          } else {
+                                              val lines = trimmed.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                                              lines.forEach { configs.add(0, parseUriToNode(it, selectedTab == 1)) }
+                                              if (configs.isNotEmpty()) selectedId = configs.first().id
+                                          }
+                                          manualInput = ""
+                                          showManualDialog = false
+                                      },
+                                      colors = ButtonDefaults.buttonColors(containerColor = Color.White)
+                                  ) {
+                                      Text("افزودن", color = Color.Black, fontWeight = FontWeight.Bold)
+                                  }
+                              },
+                              dismissButton = {
+                                  TextButton(onClick = { showManualDialog = false }) {
+                                      Text("انصراف", color = Color.Gray)
+                                  }
+                              }
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun GlassTab(title: String, count: Int, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+              Row(
+                  modifier = modifier
+                      .clip(RoundedCornerShape(20.dp))
+                      .background(if (selected) Color.White.copy(alpha = 0.14f) else Color.Transparent)
+                      .border(
+                          width = if (selected) 1.dp else 0.dp,
+                          color = if (selected) Color.White.copy(alpha = 0.3f) else Color.Transparent,
+                          shape = RoundedCornerShape(20.dp)
+                      )
+                      .clickable { onClick() }
+                      .padding(vertical = 10.dp, horizontal = 12.dp),
+                  horizontalArrangement = Arrangement.Center,
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Text(
+                      text = title,
+                      color = if (selected) Color.White else Color.Gray,
+                      fontSize = 13.sp,
+                      fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                  )
+                  if (count > 0) {
+                      Spacer(modifier = Modifier.width(6.dp))
+                      Text(
+                          text = "$count",
+                          color = Color.Black,
+                          fontSize = 11.sp,
+                          fontWeight = FontWeight.Bold,
+                          modifier = Modifier
+                              .clip(CircleShape)
+                              .background(Color.White)
+                              .padding(horizontal = 6.dp, vertical = 1.dp)
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          fun DrawerGlassButton(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+              Row(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .padding(horizontal = 16.dp, vertical = 6.dp)
+                      .clip(RoundedCornerShape(16.dp))
+                      .background(Color.White.copy(alpha = 0.06f))
+                      .clickable { onClick() }
+                      .padding(14.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                  Spacer(modifier = Modifier.width(12.dp))
+                  Text(label, color = Color.White, fontSize = 14.sp)
+              }
+          }
+
+          fun parseUriToNode(raw: String, isSub: Boolean): ConfigNode {
+              val proto = when {
+                  raw.startsWith("vless://", true) -> "VLESS"
+                  raw.startsWith("vmess://", true) -> "VMESS"
+                  raw.contains("[Interface]", true) || raw.startsWith("wg://", true) -> "WIREGUARD"
+                  else -> "CUSTOM"
+              }
+              var remark = raw.substringAfter("#", "").ifBlank { "$proto Node" }
+              var host = "1.1.1.1"
+              var port = 443
+
+              if (proto == "VLESS") {
+                  val hostPart = raw.substringAfter("@", "").substringBefore(":")
+                  if (hostPart.contains(".")) host = hostPart
+                  val portStr = raw.substringAfter("@", "").substringAfter(":", "").takeWhile { it.isDigit() }
+                  port = portStr.toIntOrNull() ?: 443
+              } else if (proto == "VMESS") {
+                  try {
+                      val b64 = raw.removePrefix("vmess://").substringBefore("#").trim()
+                      val decoded = String(android.util.Base64.decode(b64, android.util.Base64.DEFAULT), Charsets.UTF_8)
+                      val j = org.json.JSONObject(decoded)
+                      host = j.optString("add", "1.1.1.1")
+                      port = j.optInt("port", 443)
+                      remark = j.optString("ps", remark)
+                  } catch (_: Exception) {}
+              } else if (proto == "WIREGUARD") {
+                  val ep = raw.lines().find { it.trim().startsWith("Endpoint", true) }?.substringAfter("=")?.trim() ?: ""
+                  if (ep.contains(":")) {
+                      host = ep.substringBeforeLast(":")
+                      port = ep.substringAfterLast(":").toIntOrNull() ?: 51820
+                  }
+              }
+
+              return ConfigNode(
+                  id = "${System.nanoTime()}",
+                  name = try { java.net.URLDecoder.decode(remark, "UTF-8") } catch (_: Exception) { remark },
+                  protocol = proto,
+                  host = host,
+                  port = port,
+                  rawUri = raw,
+                  isSub = isSub
+              )
+          }
+          EOF
 
       - name: Build All 3 APK Variants
         run: |
@@ -318,21 +1356,21 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleAndroid14PlusDebug assembleAndroid14BelowDebug assembleUniversalDebug --stacktrace
           mkdir -p release_apks
-          cp app/build/outputs/apk/android14Plus/debug/*.apk release_apks/EM-Client_2.1.0_Android14Plus.apk
-          cp app/build/outputs/apk/android14Below/debug/*.apk release_apks/EM-Client_2.1.0_Android14Below.apk
-          cp app/build/outputs/apk/universal/debug/*.apk release_apks/EM-Client_2.1.0_Universal.apk
+          cp app/build/outputs/apk/android14Plus/debug/*.apk release_apks/EM-Client_3.0.0_Android14Plus.apk
+          cp app/build/outputs/apk/android14Below/debug/*.apk release_apks/EM-Client_3.0.0_Android14Below.apk
+          cp app/build/outputs/apk/universal/debug/*.apk release_apks/EM-Client_3.0.0_Universal.apk
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.0
-          name: EM CLIENT v2.1.0 (Liquid Glass Edition)
+          tag_name: v3.0.0
+          name: EM CLIENT v3.0.0 (Sing-box Core + Liquid Glass)
           body: |
-            ### نسخه‌های رسمی EM CLIENT
-            - **EM-Client_2.1.0_Android14Plus.apk**: مخصوص گوشی‌های اندروید ۱۴، ۱۵ و بالاتر
-            - **EM-Client_2.1.0_Android14Below.apk**: مخصوص گوشی‌های اندروید ۷ تا ۱۳
-            - **EM-Client_2.1.0_Universal.apk**: نسخه جامع قابل نصب روی تمام دستگاه‌های اندرویدی
+            ### نسخه‌های رسمی EM CLIENT v3.0.0 (مجهز به هسته واقعی Sing-box)
+            - **EM-Client_3.0.0_Android14Plus.apk**: مخصوص گوشی‌های اندروید ۱۴، ۱۵ و بالاتر
+            - **EM-Client_3.0.0_Android14Below.apk**: مخصوص گوشی‌های اندروید ۷ تا ۱۳
+            - **EM-Client_3.0.0_Universal.apk**: نسخه جامع قابل نصب روی تمام دستگاه‌های اندرویدی
           files: |
-            release_apks/EM-Client_2.1.0_Android14Plus.apk
-            release_apks/EM-Client_2.1.0_Android14Below.apk
-            release_apks/EM-Client_2.1.0_Universal.apk
+            release_apks/EM-Client_3.0.0_Android14Plus.apk
+            release_apks/EM-Client_3.0.0_Android14Below.apk
+            release_apks/EM-Client_3.0.0_Universal.apk
