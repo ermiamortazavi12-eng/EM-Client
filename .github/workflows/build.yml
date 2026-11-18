@@ -19,9 +19,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Configure Gradle Properties
         run: |
           cat << 'EOF' > gradle.properties
@@ -31,7 +28,7 @@ jobs:
           android.nonTransitiveRClass=true
           EOF
 
-      - name: Generate Gradle Wrapper & Build APK
+      - name: Build EM CLIENT APK
         run: |
           gradle wrapper --gradle-version 8.7
           chmod +x gradlew
