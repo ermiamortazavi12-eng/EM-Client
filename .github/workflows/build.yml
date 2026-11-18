@@ -1,9 +1,12 @@
-name: Build EM CLIENT Multi-Version APKs
+name: Build & Publish EM CLIENT Releases
 
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -130,7 +133,6 @@ jobs:
           android.nonTransitiveRClass=true
           EOF
 
-          # Custom Monochrome Liquid Glass Launcher Icon (EM CLIENT)
           cat << 'EOF' > app/src/main/res/drawable/ic_launcher_bg.xml
           <vector xmlns:android="http://schemas.android.com/apk/res/android"
               android:width="108dp"
@@ -305,7 +307,6 @@ jobs:
           }
           EOF
 
-          # Keep existing MainActivity.kt if already updated, or copy from repo
           FOUND_MAIN=$(find . -iname "MainActivity.kt" | head -n 1)
           if [ -n "$FOUND_MAIN" ] && [ "$FOUND_MAIN" != "./app/src/main/java/com/em/client/MainActivity.kt" ]; then
             cp "$FOUND_MAIN" app/src/main/java/com/em/client/MainActivity.kt
@@ -321,8 +322,17 @@ jobs:
           cp app/build/outputs/apk/android14Below/debug/*.apk release_apks/EM-Client_2.1.0_Android14Below.apk
           cp app/build/outputs/apk/universal/debug/*.apk release_apks/EM-Client_2.1.0_Universal.apk
 
-      - name: Upload All 3 EM-Client APKs
-        uses: actions/upload-artifact@v4
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          name: EM-Client-All-3-Versions
-          path: release_apks/*.apk
+          tag_name: v2.1.0
+          name: EM CLIENT v2.1.0 (Liquid Glass Edition)
+          body: |
+            ### نسخه‌های رسمی EM CLIENT
+            - **EM-Client_2.1.0_Android14Plus.apk**: مخصوص گوشی‌های اندروید ۱۴، ۱۵ و بالاتر
+            - **EM-Client_2.1.0_Android14Below.apk**: مخصوص گوشی‌های اندروید ۷ تا ۱۳
+            - **EM-Client_2.1.0_Universal.apk**: نسخه جامع قابل نصب روی تمام دستگاه‌های اندرویدی
+          files: |
+            release_apks/EM-Client_2.1.0_Android14Plus.apk
+            release_apks/EM-Client_2.1.0_Android14Below.apk
+            release_apks/EM-Client_2.1.0_Universal.apk
